@@ -26,11 +26,13 @@ fn main() {
     let epochs = 10;
     let eta = 0.15;
 
+    let mut work = network.alloc_batch_work(batch_size);
+
     for _ in tqdm!(0..epochs) {
         train_data.shuffle(&mut rng);
         for batch in train_data.chunks(batch_size) {
-            let (batch_length, nabla_b, nabla_w) = network.process_mini_batch(batch);
-            network.update(batch_length, nabla_b, nabla_w, eta);
+            network.process_mini_batch(&mut work, batch);
+            network.update(&work, eta);
         }
     }
 

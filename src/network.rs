@@ -24,6 +24,16 @@ impl Default for Network {
     }
 }
 
+struct Nabla {
+    b: Array2<f32>,
+    w: Array2<f32>,
+}
+
+pub struct BatchWork {
+    batch_length: usize,
+    nablas: Vec<Nabla>,
+}
+
 impl Network {
     pub fn new(layer_sizes: Vec<usize>) -> Self {
         let mut biases = Vec::with_capacity(layer_sizes.len());
@@ -54,48 +64,53 @@ impl Network {
         input
     }
 
-    pub fn update(&mut self, batch_length: usize, nabla_b: Vec<Array2<f32>>, nabla_w: Vec<Array2<f32>>, eta: f32) {
-        for (b, nb) in self.biases.iter_mut().zip(nabla_b.into_iter()) {
-            *b = &*b - (eta / (batch_length as f32)) * nb;
-        }
+    pub fn alloc_batch_work(&self, batch_length: usize) -> BatchWork {
+        let nablas: Vec<_> = self.biases.iter().zip(self.weights.iter()).map(|(b, w)| {
+            let b = Array::zeros((b.shape()[0], b.shape()[1]));
+            let w = Array::zeros((w.shape()[0], w.shape()[1]));
+            Nabla { b, w }
+        }).collect();
 
-        for (w, nw) in self.weights.iter_mut().zip(nabla_w.into_iter()) {
-            *w = &*w - (eta / (batch_length as f32)) * nw;
+        BatchWork {
+            batch_length,
+            nablas,
         }
     }
 
-    pub fn process_mini_batch(&self, batch: &[Example]) -> (usize, Vec<Array2<f32>>, Vec<Array2<f32>>) {
-        let mut nabla_b: Vec<Array2<f32>> = self.biases
-            .iter()
-            .map(|b| Array::zeros((b.shape()[0], b.shape()[1])))
-            .collect();
-
-        let mut nabla_w: Vec<Array2<f32>> = self.weights
-            .iter()
-            .map(|w| Array::zeros((w.shape()[0], w.shape()[1])))
-            .collect();
-
-        let deltas: Vec<_> = batch.par_iter().map(|example| self.backprop(&example.x, &example.y)).collect();
-
-        for delta in deltas.into_iter() {
-            let (delta_b, delta_w) = delta;
-            nabla_b.iter_mut().zip(delta_b.into_iter()).for_each(|(nb, dnb)| *nb = &*nb + &dnb);
-            nabla_w.iter_mut().zip(delta_w.into_iter()).for_each(|(nw, dnw)| *nw = &*nw + &dnw);
+    pub fn update(&mut self, work: &BatchWork, eta: f32) {
+        for (b, nb) in self.biases.iter_mut().zip(work.nablas.iter()) {
+            *b = &*b - (eta / (work.batch_length as f32)) * &nb.b;
         }
 
-        (batch.len(), nabla_b, nabla_w)
+        for (w, nb) in self.weights.iter_mut().zip(work.nablas.iter()) {
+            *w = &*w - (eta / (work.batch_length as f32)) * &nb.w;
+        }
     }
 
-    fn backprop(&self, x: &Array2<f32>, y: &Array2<f32>) -> (Vec<Array2<f32>>, Vec<Array2<f32>>) {
-        let mut nabla_b: Vec<Array2<f32>> = self.biases
-            .iter()
-            .map(|b| Array::zeros((b.shape()[0], b.shape()[1])))
-            .collect();
+    pub fn process_mini_batch(&self, work: &mut BatchWork, batch: &[Example]) {
+        assert_eq!(work.batch_length, batch.len());
+        work.nablas.iter_mut().for_each(|nabla| {
+            nabla.b.iter_mut().for_each(|v| *v = 0.);
+            nabla.w.iter_mut().for_each(|v| *v = 0.);
+        });
 
-        let mut nabla_w: Vec<Array2<f32>> = self.weights
-            .iter()
-            .map(|w| Array::zeros((w.shape()[0], w.shape()[1])))
-            .collect();
+        let layer_nablas: Vec<_> = batch.par_iter().map(|example| self.backprop(&example.x, &example.y)).collect();
+
+        for nabla in layer_nablas.into_iter() {
+            work.nablas.iter_mut().zip(nabla.into_iter()).for_each(|(nabla, delta_nabla)| {
+                nabla.b = &nabla.b + &delta_nabla.b;
+                nabla.w = &nabla.w + &delta_nabla.w;
+            });
+        }
+    }
+
+    fn backprop(&self, x: &Array2<f32>, y: &Array2<f32>) -> Vec<Nabla> {
+        // let mut nabla: Vec<_> = self.biases.iter().zip(self.weights.iter()).map(|(b, w)| {
+        //     let b = Array::zeros((b.shape()[0], b.shape()[1]));
+        //     let w = Array::zeros((w.shape()[0], w.shape()[1]));
+        //     Nabla { b, w }
+        // }).collect();
+        let mut nablas = Vec::with_capacity(self.num_layers);
 
         let mut activations = Vec::with_capacity(self.num_layers + 1);
         let mut zs = Vec::with_capacity(self.num_layers);
@@ -113,19 +128,25 @@ impl Network {
         // Output Error
         let mut delta: Array2<f32> = Network::cost_derivative(&activations.last().unwrap(), &y) *
             sigmoid_prime(zs.last().unwrap());
-        *nabla_w.last_mut().unwrap() = delta.dot(&activations[activations.len() - 2].t());
-        *nabla_b.last_mut().unwrap() = delta.clone();
+        // let Nabla { b, w } = nabla.last_mut().unwrap();
+        let w = delta.dot(&activations[activations.len() - 2].t());
+        let b = delta.clone();
+        nablas.push(Nabla { b, w });
 
         // Backpropagate
         for i in 2..self.num_layers {
             let z = &zs[zs.len() - i];
             let sp = sigmoid_prime(z);
             delta = self.weights[self.weights.len() - i + 1].t().dot(&delta) * sp;
-            nabla_w[self.weights.len() - i] = delta.dot(&activations[activations.len() - i - 1].t());
-            nabla_b[self.biases.len() - i] = delta.clone();
+            // let idx = nabla.len() - i;
+            // let Nabla { b, w } = nabla.get_mut(idx).unwrap();
+            let w = delta.dot(&activations[activations.len() - i - 1].t());
+            let b = delta.clone();
+            nablas.push(Nabla { b, w });
         }
 
-        (nabla_b, nabla_w)
+        nablas.reverse();
+        nablas
     }
 
     fn cost_derivative(activation: &Array2<f32>, y: &Array2<f32>) -> Array2<f32> {
