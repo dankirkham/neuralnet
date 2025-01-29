@@ -1,16 +1,35 @@
 mod mnist;
 mod network;
 
+use std::{fs::File, io::BufWriter};
+
 use kdam::tqdm;
 use ndarray::{Array2, Axis};
 use ndarray_stats::QuantileExt;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use tracing_flame::FlameLayer;
+use tracing_subscriber::{registry::Registry, prelude::*, fmt};
 
 use mnist::load_data;
 use network::Network;
 
+fn setup_global_subscriber() -> impl Drop {
+    let fmt_layer = fmt::Layer::default();
+
+    let (flame_layer, _guard) = FlameLayer::with_file("./tracing.folded").unwrap();
+
+    let subscriber = Registry::default()
+        .with(fmt_layer)
+        .with(flame_layer);
+
+    tracing::subscriber::set_global_default(subscriber).expect("Could not set global default");
+    _guard
+}
+
 fn main() {
+    let _guard = setup_global_subscriber();
+
     let mut rng = thread_rng();
 
     let train_data = load_data("./data/train").unwrap();
